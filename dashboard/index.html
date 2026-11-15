@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — pre-token protocols ranked by implied value</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Token Launch Radar</h1>
+    <p class="tag">Every protocol that could still launch a token, ranked by what that token would be worth.</p>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main>
+  <section class="card" id="model-card">
+    <h2>How the radar prices a launch</h2>
+    <p>Implied value = TVL &times; category multiple &times; growth &times; maturity. The category multiple is the
+    median market-cap-to-TVL ratio of the live-token protocols in the same category, taken from this very snapshot
+    &mdash; never a number typed in by hand. A category with fewer than three live comparables falls back to the
+    global median. Growth is the 7-day TVL change, clamped to &minus;60%..+120% and half-weighted. Maturity rises
+    from 0.60 to 1.00 over a protocol&rsquo;s first three years with no token. No protocol name is ever
+    special-cased: the same formula scores every row.</p>
+    <p class="note">A protocol is &ldquo;pre-token&rdquo; when DefiLlama records no token for it. That is the record
+    speaking, not a promise: a listed protocol may still hold a token the record does not carry. Wrapped, staked
+    and bridged products, exchanges and versioned pools are left out &mdash; they are not launches waiting to
+    happen.</p>
+    <div class="mults" id="multiples"></div>
+  </section>
+
+  <section class="card">
+    <h2>The board</h2>
+    <div class="controls">
+      <input id="q" type="search" placeholder="Search name or slug&hellip;" aria-label="Search">
+      <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+      <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
+      <label class="check"><input id="watch" type="checkbox"> Watchlist only</label>
+      <label class="check"><input id="growing" type="checkbox"> Growing only (7d &gt; 0)</label>
+      <button id="reset" type="button">Reset</button>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="board">
+        <thead>
+          <tr>
+            <th data-sort="rank" class="num sorted">#</th>
+            <th data-sort="name">Protocol</th>
+            <th data-sort="category">Category</th>
+            <th data-sort="chains">Chains</th>
+            <th data-sort="tvl_usd" class="num">TVL</th>
+            <th data-sort="change_7d" class="num">7d</th>
+            <th data-sort="age_days" class="num">Age</th>
+            <th data-sort="implied_value_usd" class="num">Implied value</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="hint">Click a column header to sort. Click a row to open its detail view and farm plan.</p>
+  </section>
+
+  <section class="card hidden" id="detail-card">
+    <h2 id="detail-title">Protocol detail</h2>
+    <div id="detail"></div>
+  </section>
+
+  <section class="card">
+    <h2>Live tokens: the market&rsquo;s own prices</h2>
+    <p>These protocols already trade, so the board shows the market&rsquo;s value for them instead of a model&rsquo;s.
+    Their market-cap-to-TVL ratios are what price every category above.</p>
+    <div class="table-wrap">
+      <table id="live">
+        <thead>
+          <tr>
+            <th>Protocol</th>
+            <th>Category</th>
+            <th class="num">TVL</th>
+            <th class="num">Market cap</th>
+            <th class="num">FDV / TVL</th>
+            <th class="num">7d</th>
+          </tr>
+        </thead>
+        <tbody id="live-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="card foot">
+    <p id="source-line"></p>
+    <p>Implied value is this radar&rsquo;s own claim, never a prediction that a token will be issued or when.
+    Farm steps are a starting plan, not financial advice: check the protocol&rsquo;s own pages before you move money.</p>
+  </footer>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
