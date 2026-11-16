@@ -42,6 +42,17 @@
   function multText(m) {
     return (Math.round(m * 1000) / 1000).toFixed(3) + 'x';
   }
+  function provText(source, group, n) {
+    if (source === 'category') return 'category median, ' + n + ' live';
+    if (source === 'group') return (group || 'group') + ' group median, ' + n + ' live';
+    return 'global median';
+  }
+  function chainsText(chains) {
+    var c = chains || [];
+    if (c.length === 0) return '—';
+    if (c.length <= 3) return c.join(', ');
+    return c.slice(0, 3).join(', ') + ' +' + (c.length - 3);
+  }
 
   // ---- header stats -------------------------------------------------------
   $('stats').innerHTML =
@@ -53,9 +64,10 @@
 
   // ---- category multiples ---------------------------------------------------
   var multHtml = D.multiples.map(function (m) {
-    return '<span class="mult">' + esc(m.category) + ' <b>' + multText(m.multiple) + '</b> <small>' + m.comparables + ' live</small></span>';
+    return '<span class="mult">' + esc(m.category) + ' <b>' + multText(m.multiple) + '</b> <small>' + esc(provText(m.source, m.group, m.comparables)) + '</small></span>';
   }).join('');
   multHtml += '<span class="mult">Global fallback <b>' + multText(D.global_multiple) + '</b> <small>median of all live</small></span>';
+  if (D.ratio_cap) multHtml += '<span class="mult">Ratios capped <b>' + multText(D.ratio_cap) + '</b> <small>upper Tukey fence</small></span>';
   $('multiples').innerHTML = multHtml;
 
   // ---- filter options -------------------------------------------------------
@@ -167,12 +179,12 @@
       '<div class="stat"><b>' + moneyFull(r.tvl_usd) + '</b><span>TVL</span></div>' +
       '<div class="stat"><b>' + pct(r.change_7d) + '</b><span>TVL change, 7 days</span></div>' +
       '<div class="stat"><b>' + esc(r.category || '—') + '</b><span>category</span></div>' +
-      '<div class="stat"><b>' + esc((r.chains || []).join(', ') || '—') + '</b><span>chains</span></div>' +
+      '<div class="stat"><b>' + esc(chainsText(r.chains)) + '</b><span>chains</span></div>' +
       '<div class="stat"><b>' + ageText(r.age_days) + '</b><span>tracked since ' + esc(r.listed_at || 'unknown') + '</span></div>' +
       '</div>' +
       '<h3>How the value is built</h3>' +
       '<table class="model-break"><tbody>' +
-      '<tr><td>TVL &times; category multiple (' + multText(r.category_multiple) + ')</td><td class="num">' + moneyFull(base) + '</td></tr>' +
+      '<tr><td>TVL &times; category multiple (' + multText(r.category_multiple) + ', ' + esc(provText(r.multiple_source, r.multiple_group, r.category_comparables)) + ')</td><td class="num">' + moneyFull(base) + '</td></tr>' +
       '<tr><td>Growth multiplier (' + pct((r.growth_multiplier - 1) * 2 * 100) + ' 7-day change, half-weighted)</td><td class="num">' + r.growth_multiplier.toFixed(2) + 'x</td></tr>' +
       '<tr><td>Maturity multiplier (' + ageText(r.age_days) + ' with no token)</td><td class="num">' + r.maturity_multiplier.toFixed(2) + 'x</td></tr>' +
       '<tr><td><b>Implied value</b></td><td class="num"><b>' + moneyFull(r.implied_value_usd) + '</b></td></tr>' +

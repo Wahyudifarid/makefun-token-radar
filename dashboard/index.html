@@ -21,8 +21,11 @@
     <h2>How the radar prices a launch</h2>
     <p>Implied value = TVL &times; category multiple &times; growth &times; maturity. The category multiple is the
     median market-cap-to-TVL ratio of the live-token protocols in the same category, taken from this very snapshot
-    &mdash; never a number typed in by hand. A category with fewer than three live comparables falls back to the
-    global median. Growth is the 7-day TVL change, clamped to &minus;60%..+120% and half-weighted. Maturity rises
+    &mdash; never a number typed in by hand. A category with only one or two live comparables is shrunk toward the
+    global median, three parts global to each comparable, and a category with none is priced from its group median
+    (yield-and-credit, trading, staking, money or real-world) or the global median. Each live ratio is capped at
+    the snapshot&rsquo;s own upper Tukey fence before any median is taken, so one extreme protocol cannot price a
+    whole category. Growth is the 7-day TVL change, clamped to &minus;60%..+120% and half-weighted. Maturity rises
     from 0.60 to 1.00 over a protocol&rsquo;s first three years with no token. No protocol name is ever
     special-cased: the same formula scores every row.</p>
     <p class="note">A protocol is &ldquo;pre-token&rdquo; when DefiLlama records no token for it. That is the record

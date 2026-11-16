@@ -10,10 +10,27 @@
 // Implied value is derived from the snapshot's own figures, never from a
 // hand-written list of names:
 //
-//   multiple(cat)  = median FDV/TVL of the live-token protocols in the same
-//                    category (market cap over TVL, from this snapshot). A
-//                    category with fewer than three live comparables falls
-//                    back to the global median across all live protocols.
+//   ratio(p)       = market cap / TVL of one live-token protocol, capped at
+//                    the snapshot's upper Tukey fence (Q3 + 1.5 x IQR of all
+//                    live ratios). The cap is there because a category's
+//                    median is only as honest as its noisiest comparable:
+//                    one protocol at 400x would otherwise price its whole
+//                    category at 100x. The fence is computed from this
+//                    snapshot, never typed in.
+//   multiple(cat)  = the median live ratio of the category, shrunk toward
+//                    the global median by comparables count:
+//                      (n x cat_median + k x global) / (n + k), k = 3.
+//                    A category with one or two comparables still
+//                    contributes its own signal instead of being discarded,
+//                    but a single observation cannot dominate the multiple.
+//                    A category with no live comparables at all is priced
+//                    from its group's pooled median (yield-and-credit,
+//                    trading, staking, money or real-world — a fixed,
+//                    documented mapping of category names to groups, applied
+//                    consistently), or from the global median when it
+//                    belongs to no group with at least three pooled
+//                    comparables. Every row's detail view states which of
+//                    the three priced it.
 //   growth         = clamp(change_7d, -60, +120) per cent
 //   growthMult     = 1 + 0.5 * growth / 100
 //   maturity       = 0.6 + 0.4 * min(age_days, 1095) / 1095
@@ -22,9 +39,10 @@
 //                                  * maturity))
 //
 // The median is used because a category's mean is dragged by outliers (one
-// bridge at 8x would price every bridge at 8x). The dashboard prints the
-// multiple each category got and how many live protocols priced it, so a
-// reader can check the model instead of taking it on trust.
+// bridge at 8x would price every bridge at 8x), and the cap exists for the
+// same reason one observation below that. The dashboard prints the multiple
+// each category got, how it was priced, and how many live protocols priced
+// it, so a reader can check the model instead of taking it on trust.
 //
 // Farm plans are generated from the protocol's own record (category, chains,
 // TVL, age): the action fits the category, the capital fits the TVL, the
@@ -63,7 +81,8 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
-  min_comparables: number;
+  shrinkage_k: number;
+  group_min_comparables: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -74,11 +93,12 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.4,
   maturity_days: 1095,
   unknown_age_days: 365,
-  min_comparables: 3,
+  shrinkage_k: 3,
+  group_min_comparables: 3,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** One category's pricing: its live-token multiple and how it was priced. */
 export interface CategoryMultiple {
@@ -86,6 +106,33 @@ export interface CategoryMultiple {
   multiple: number;
   comparables: number;
   fallback: boolean;
+  source: 'category' | 'group' | 'global';
+  group: string | null;
+}
+
+/**
+ * The category groups for the group fallback: a fixed, documented mapping of
+ * category names to the business they belong to, applied to every category
+ * the same way. It is a model choice about categories, never a list of
+ * protocol names: no protocol is ever priced because of its name. A group
+ * only prices a category when its pooled live comparables reach
+ * group_min_comparables; otherwise the global median prices it.
+ */
+export const CATEGORY_GROUPS: Record<string, string[]> = {
+  'yield-and-credit': ['Lending', 'Yield', 'Yield Aggregator', 'CDP', 'CDP Manager', 'Onchain Capital Allocator', 'Risk Curators', 'Uncollateralized Lending', 'Collateral Markets', 'Leveraged Farming', 'Farm', 'Interest Rate Derivatives', 'Restaking', 'Liquid Restaking', 'Staking Pool'],
+  trading: ['Dexs', 'Derivatives', 'Options', 'Options Vault', 'Prediction Market', 'Basis Trading', 'Indexes', 'Liquidity Manager'],
+  staking: ['Liquid Staking', 'Restaked BTC'],
+  money: ['Stablecoin Wrapper', 'Dual-Token Stablecoin', 'Payments', 'Crypto Card Issuer', 'CeDeFi'],
+  'real-world': ['RWA', 'Insurance', 'OTC Marketplace'],
+};
+
+/** The group a category belongs to, or null when it belongs to none. */
+export function categoryGroup(category: string | null): string | null {
+  const key = category ?? 'Uncategorized';
+  for (const [group, members] of Object.entries(CATEGORY_GROUPS)) {
+    if (members.includes(key)) return group;
+  }
+  return null;
 }
 
 /** A farm step: the action, what it costs, and how long it takes. */
@@ -115,6 +162,8 @@ export interface BoardRow {
     category_multiple: number;
     category_comparables: number;
     category_fallback: boolean;
+    multiple_source: 'category' | 'group' | 'global';
+    multiple_group: string | null;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -136,6 +185,9 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   category_multiple: number;
+  category_comparables: number;
+  multiple_source: 'category' | 'group' | 'global';
+  multiple_group: string | null;
   growth_multiplier: number;
   maturity_multiplier: number;
   farm_steps: string[];
@@ -167,6 +219,7 @@ export interface RadarData {
   live_size: number;
   multiples: CategoryMultiple[];
   global_multiple: number;
+  ratio_cap: number;
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -227,48 +280,99 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return true;
 }
 
-/** The median FDV/TVL multiple per category, from the live-token protocols in this snapshot. */
-export function categoryMultiples(snapshot: Snapshot, model: ModelConstants = MODEL): { byCategory: Map<string, CategoryMultiple>; global: number } {
-  const perCategory = new Map<string, number[]>();
-  const all: number[] = [];
+/** The p-th quantile of a sorted list, nearest-rank; 0 when empty. */
+function quantile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
+}
+
+/** Everything the model needs to price one category: the shrunk category multiples, the global median, the ratio cap, and the pooled group medians. */
+export interface PricedMultiples {
+  byCategory: Map<string, CategoryMultiple>;
+  global: number;
+  ratioCap: number;
+  groups: Map<string, { multiple: number; comparables: number }>;
+}
+
+/**
+ * The pricing table, from the live-token protocols in this snapshot. Each
+ * live ratio is capped at the snapshot's upper Tukey fence (Q3 + 1.5 x IQR
+ * of all live ratios) before any median is taken, so one protocol at 400x
+ * cannot price its whole category. Each category's own median is then shrunk
+ * toward the global median by comparables count, and each group's pooled
+ * median is kept for the categories that have no comparables at all.
+ */
+export function categoryMultiples(snapshot: Snapshot, model: ModelConstants = MODEL): PricedMultiples {
+  const rawPerCategory = new Map<string, number[]>();
+  const rawAll: number[] = [];
   for (const p of snapshot.protocols) {
     if (isPreToken(p)) continue;
     if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) continue;
     const ratio = p.mcap_usd / p.tvl_usd;
     if (!Number.isFinite(ratio) || ratio <= 0) continue;
-    all.push(ratio);
+    rawAll.push(ratio);
     const key = p.category ?? 'Uncategorized';
-    const list = perCategory.get(key) ?? [];
+    const list = rawPerCategory.get(key) ?? [];
     list.push(ratio);
-    perCategory.set(key, list);
+    rawPerCategory.set(key, list);
+  }
+  const sorted = [...rawAll].sort((a, b) => a - b);
+  const q1 = quantile(sorted, 0.25);
+  const q3 = quantile(sorted, 0.75);
+  const ratioCap = sorted.length >= 4 && Number.isFinite(q1) && Number.isFinite(q3) ? q3 + 1.5 * (q3 - q1) : Infinity;
+  const cap = (r: number): number => Math.min(r, ratioCap);
+  const perCategory = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const [category, ratios] of rawPerCategory) {
+    const capped = ratios.map(cap);
+    perCategory.set(category, capped);
+    all.push(...capped);
   }
   const global = median(all);
   const byCategory = new Map<string, CategoryMultiple>();
   for (const [category, ratios] of perCategory) {
-    if (ratios.length >= model.min_comparables) {
-      byCategory.set(category, { category, multiple: median(ratios), comparables: ratios.length, fallback: false });
-    }
+    const n = ratios.length;
+    const shrunk = (n * median(ratios) + model.shrinkage_k * global) / (n + model.shrinkage_k);
+    byCategory.set(category, { category, multiple: shrunk, comparables: n, fallback: false, source: 'category', group: null });
   }
-  return { byCategory, global };
+  const groups = new Map<string, { multiple: number; comparables: number }>();
+  for (const [group, members] of Object.entries(CATEGORY_GROUPS)) {
+    const pooled: number[] = [];
+    for (const member of members) pooled.push(...(perCategory.get(member) ?? []));
+    if (pooled.length > 0) groups.set(group, { multiple: median(pooled), comparables: pooled.length });
+  }
+  return { byCategory, global, ratioCap, groups };
 }
 
-/** The multiple one category gets: its own median, or the global median when too few comparables price it. */
-export function multipleFor(category: string | null, priced: { byCategory: Map<string, CategoryMultiple>; global: number }): CategoryMultiple {
+/**
+ * The multiple one category gets: its own shrunk median when it has live
+ * comparables; its group's pooled median when it has none and the group
+ * clears the comparables bar; the global median otherwise. The provenance
+ * travels with the row so the detail view can state it.
+ */
+export function multipleFor(category: string | null, priced: PricedMultiples, model: ModelConstants = MODEL): CategoryMultiple {
   const key = category ?? 'Uncategorized';
   const own = priced.byCategory.get(key);
   if (own !== undefined) return own;
-  return { category: key, multiple: priced.global, comparables: 0, fallback: true };
+  const group = categoryGroup(key);
+  if (group !== null) {
+    const pooled = priced.groups.get(group);
+    if (pooled !== undefined && pooled.comparables >= model.group_min_comparables) {
+      return { category: key, multiple: pooled.multiple, comparables: pooled.comparables, fallback: true, source: 'group', group };
+    }
+  }
+  return { category: key, multiple: priced.global, comparables: 0, fallback: true, source: 'global', group: null };
 }
 
 /** The three multipliers and the implied value one protocol gets under `model`. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  priced: { byCategory: Map<string, CategoryMultiple>; global: number },
+  priced: PricedMultiples,
   model: ModelConstants = MODEL,
 ): { implied: number; multiple: CategoryMultiple; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const multiple = multipleFor(protocol.category, priced);
+  const multiple = multipleFor(protocol.category, priced, model);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -284,7 +388,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; priced: { byCategory: Map<string, CategoryMultiple>; global: number } } {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; priced: PricedMultiples } {
   const priced = categoryMultiples(snapshot, model);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -323,6 +427,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
       category_multiple: round4(s.multiple.multiple),
       category_comparables: s.multiple.comparables,
       category_fallback: s.multiple.fallback,
+      multiple_source: s.multiple.source,
+      multiple_group: s.multiple.group,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -346,6 +452,30 @@ export function stepText(step: FarmStep): string {
 /** The first chain a protocol names, or a neutral phrase. */
 function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
+}
+
+/** The protocol's chains, capped at three with a count, as the board shows them. */
+function chainsShort(p: SnapshotProtocol): string {
+  if (p.chains.length === 0) return 'its main chain';
+  const shown = p.chains.slice(0, 3).join(', ');
+  return p.chains.length > 3 ? `${shown} +${p.chains.length - 3}` : shown;
+}
+
+/** The weekly action for the category's real activity, in the words a farmer can follow. */
+function weeklyActionFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) return 'adjust the borrow, claim the interest that accrued, and re-check the health factor';
+  if (c.includes('dex') || c.includes('leveraged farm')) return 'swap $10 through the busiest pool, or add and remove a small amount of liquidity';
+  if (c.includes('yield') || c.includes('vault') || c.includes('curator') || c.includes('allocator') || c.includes('capital')) return 'check the vault yield, top up $10 if it is still paying, or move to the better vault on the same protocol';
+  if (c.includes('bridge')) return 'bridge $10 of USDC to the chain and back, or use the bridged funds inside the app';
+  if (c.includes('stak') || c.includes('restak')) return 'check the staking rewards that accrued, then restake them or claim them';
+  if (c.includes('perpetual') || c.includes('derivative') || c.includes('options')) return 'open and close one small hedged position, or close the open one and re-open it';
+  if (c.includes('prediction')) return 'settle a finished market, or take a position in a new one';
+  if (c.includes('stable')) return 'check the peg and the yield, and mint or redeem $10 if the rate moved';
+  if (c.includes('rwa')) return 'check the yield that accrued and confirm the next payout date';
+  if (c.includes('insurance')) return 'check the cover is still active and what premium is due';
+  if (c.includes('payment') || c.includes('card')) return 'spend $10 through the card or account and confirm the transaction posted';
+  return 'make one real action: a deposit, a swap, a vote, or a claim';
 }
 
 /** How much capital one farm position needs, from the protocol's own TVL. */
@@ -397,9 +527,10 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const hold = holdDaysFor(age);
   const gas = gasFor(p);
   const action = actionFor(p, capital, chain);
+  const weekly = weeklyActionFor(p);
   return [
     {
-      text: `Open a fresh wallet that holds only the funds you plan to farm, and write its seed phrase on paper, never in a chat or a screenshot.`,
+      text: `Open a fresh wallet that holds only the funds you plan to farm, and write its seed phrase on paper, never in a chat or a screenshot. On ${chain}, one transaction costs about ${gas}.`,
       cost: 'nothing but the wallet',
       time: '5 minutes',
     },
@@ -409,8 +540,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: '15 minutes to set up',
     },
     {
-      text: `Come back once a week and make one real action: a deposit, a swap, a vote, or a claim.`,
-      cost: 'about $2 of gas a week',
+      text: `Come back once a week: ${weekly}.`,
+      cost: `about ${gas} a week`,
       time: '10 minutes a week',
     },
     {
@@ -419,12 +550,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw anything, open the protocol's own rewards page from its official site and claim only from the link it publishes.`,
+      text: `Before you withdraw anything, open the protocol's own rewards page from its official site and claim only from the link it publishes. A claim on ${chain} costs about ${gas}; never pay a separate fee to claim.`,
       cost: 'nothing to check, and never pay to claim',
       time: '10 minutes',
     },
     {
-      text: `Write the wallet, the dates and every transaction hash in a farm log, so you can repeat the position or unwind it cleanly.`,
+      text: `Write the wallet, the $${capital} on ${chain} (${chainsShort(p)}), the dates and every transaction hash in a farm log, so you can repeat the position or unwind it cleanly.`,
       cost: 'nothing but the log',
       time: '5 minutes',
     },
@@ -463,6 +594,9 @@ export function radarRow(row: BoardRow, watchlist: string[]): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     category_multiple: row.model.category_multiple,
+    category_comparables: row.model.category_comparables,
+    multiple_source: row.model.multiple_source,
+    multiple_group: row.model.multiple_group,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     farm_steps: row.farm_steps,
@@ -475,7 +609,24 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const { board, priced } = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
-  const multiples: CategoryMultiple[] = [...priced.byCategory.values()].sort((a, b) => b.multiple - a.multiple || (a.category < b.category ? -1 : 1));
+  // The multiples strip names every category on the board, with its provenance,
+  // so a reader sees at a glance which categories priced themselves and which
+  // borrowed a group or the global median.
+  const seen = new Map<string, CategoryMultiple>();
+  for (const r of board) {
+    const key = r.category ?? 'Uncategorized';
+    if (!seen.has(key)) {
+      seen.set(key, {
+        category: key,
+        multiple: r.model.category_multiple,
+        comparables: r.model.category_comparables,
+        fallback: r.model.category_fallback,
+        source: r.model.multiple_source,
+        group: r.model.multiple_group,
+      });
+    }
+  }
+  const multiples: CategoryMultiple[] = [...seen.values()].sort((a, b) => b.multiple - a.multiple || (a.category < b.category ? -1 : 1));
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -488,6 +639,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     multiples,
     global_multiple: round4(priced.global),
+    ratio_cap: Number.isFinite(priced.ratioCap) ? round4(priced.ratioCap) : 0,
     rows: board.map((r) => radarRow(r, snapshot.watchlist)),
     live,
   };

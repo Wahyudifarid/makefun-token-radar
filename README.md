@@ -11,8 +11,14 @@ every protocol, and the live-token market the model is priced from.
 Implied value = TVL x category multiple x growth x maturity.
 
 - **Category multiple**: the median market-cap-to-TVL ratio of the live-token
-  protocols in the same category, taken from the snapshot itself. A category
-  with fewer than three live comparables falls back to the global median.
+  protocols in the same category, taken from the snapshot itself, shrunk
+  toward the global median by comparables count: (n x category median + 3 x
+  global) / (n + 3). A category with no live comparables is priced from its
+  group median (yield-and-credit, trading, staking, money or real-world) or
+  the global median. Each live ratio is capped at the snapshot's upper Tukey
+  fence (Q3 + 1.5 x IQR) before any median is taken, so one extreme protocol
+  cannot price a whole category. Every row's detail view states which of the
+  three priced it.
 - **Growth**: the 7-day TVL change, clamped to -60%..+120% and half-weighted.
 - **Maturity**: 0.60 rising to 1.00 over a protocol's first three years with no
   token (365 days when the listing date is unknown).
